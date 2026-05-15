@@ -2,8 +2,8 @@
 Academy Receipt Generation System  ·  v2.0
 - Staff name: dropdown (Omar, Menna, Mariem) + free input
 - Notes moved to end
-- Receipt = fill Word template + generate PDF via reportlab
-- Deployment-ready (Streamlit Cloud / GitHub)
+- Receipt = fill Word template → PDF via LibreOffice (fallback: reportlab)
+- Deployment-ready (Streamlit Cloud via packages.txt + GitHub)
 """
 
 import streamlit as st
@@ -11,6 +11,7 @@ import pandas as pd
 import json
 import os
 import re
+import subprocess
 import tempfile
 import zipfile
 from datetime import datetime
@@ -347,8 +348,22 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
                 zout.writestr(name, content)
         docx_bytes = open(docx_path, "rb").read()
 
-    pdf_bytes = _generate_pdf(data)
+        # Convert filled DOCX to PDF — try soffice first
+        pdf_path = os.path.join(tmp, "receipt.pdf")
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "pdf",
+                 "--outdir", tmp, docx_path],
+                capture_output=True, text=True, timeout=90,
+            )
+            if os.path.exists(pdf_path):
+                pdf_bytes = open(pdf_path, "rb").read()
+                return docx_bytes, pdf_bytes
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
+    # Fallback: generate PDF via reportlab
+    pdf_bytes = _generate_pdf(data)
     return docx_bytes, pdf_bytes
 
 
