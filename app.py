@@ -340,10 +340,9 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
     xml = _fix_split_placeholders(xml)
     xml = _substitute(xml, data)
 
-    # Remove absolute table positioning so tables flow naturally
-    # (prevents overlap when LibreOffice converts to PDF)
-    xml = re.sub(r'<w:tblpPr[^>]*/>', '', xml)
-    xml = re.sub(r'<w:tblpPr>.*?</w:tblpPr>', '', xml)
+    # Unify table anchoring to "page" so LibreOffice renders them at
+    # consistent positions (prevents table overlap in PDF conversion)
+    xml = re.sub(r'vertAnchor="text"', 'vertAnchor="page"', xml)
 
     file_contents["word/document.xml"] = xml.encode("utf-8")
 
