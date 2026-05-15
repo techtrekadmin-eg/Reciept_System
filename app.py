@@ -339,6 +339,12 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
     xml = file_contents["word/document.xml"].decode("utf-8")
     xml = _fix_split_placeholders(xml)
     xml = _substitute(xml, data)
+
+    # Remove absolute table positioning so tables flow naturally
+    # (prevents overlap when LibreOffice converts to PDF)
+    xml = re.sub(r'<w:tblpPr[^>]*/>', '', xml)
+    xml = re.sub(r'<w:tblpPr>.*?</w:tblpPr>', '', xml)
+
     file_contents["word/document.xml"] = xml.encode("utf-8")
 
     with tempfile.TemporaryDirectory() as tmp:
