@@ -1,0 +1,10 @@
+receipts/
+generated/
+*.pyc
+__pycache__/
+.cache/
+.env
+nul
+counter.txt
+receipt_counter.json
+tracks.xlsx

@@ -1,0 +1,481 @@
+"""
+Academy Receipt Generation System  ·  v2.0
+- Staff name: dropdown (Omar, Menna, Mariem) + free input
+- Notes moved to end
+- Receipt = fill Word template → convert to PDF via LibreOffice
+- Deployment-ready (Streamlit Cloud / GitHub)
+"""
+
+import streamlit as st
+import pandas as pd
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from xml.sax.saxutils import escape
+import base64
+# ── Constants ────────────────────────────────────────────────────────────────
+RECEIPTS_DIR    = Path("receipts")
+COUNTER_FILE    = Path("receipt_counter.json")
+EXCEL_FILE      = Path("tracks.xlsx")
+TEMPLATE_FILE   = Path("receipt_template.docx")
+STAFF_LIST      = ["Omar Mohamed", "Menna Hagag", "Mariem Hisham"]
+ACADEMY_NAME    = "TechTrek"
+SOFFICE_WRAPPER = Path("/mnt/skills/public/docx/scripts/office/soffice.py")
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="TechTrek · Receipt System",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"] { background: var(--background-color); }
+[data-testid="stSidebar"]           { display: none; }
+.section-card {
+    background: var(--secondary-background-color, #ffffff);
+    border-radius:12px; padding:22px 26px; margin-bottom:18px;
+    box-shadow:0 2px 8px rgba(0,0,0,.07);
+    border-left:4px solid #dc2626;
+}
+.section-title {
+    font-size:.93rem; font-weight:700; color:#dc2626;
+    text-transform:uppercase; letter-spacing:.06em; margin-bottom:14px;
+}
+.app-header {
+    background:linear-gradient(135deg,#b91c1c 0%,#dc2626 100%);
+    border-radius:14px; padding:22px 30px; margin-bottom:26px;
+    display:flex; align-items:center; gap:18px;
+}
+.app-header h1 { color:#fff; font-size:1.7rem; margin:0; }
+.app-header p  { color:#fecaca; margin:4px 0 0; font-size:.9rem; }
+.summary-box {
+    background:linear-gradient(135deg,#fef2f2,#fee2e2);
+    border:1.5px solid #fca5a5; border-radius:10px; padding:18px 22px;
+}
+[data-theme="dark"] .summary-box {
+    background:linear-gradient(135deg,#2d1515,#1c0f0f);
+    border-color:#7f1d1d;
+}
+.s-row { display:flex; justify-content:space-between; padding:6px 0;
+         border-bottom:1px dashed var(--text-color, #bfdbfe); font-size:.93rem; }
+.s-row:last-child { border-bottom:none; }
+.s-lbl { color:#dc2626; font-weight:600; }
+.s-val { color: var(--text-color); }
+.s-total { font-size:1.05rem; font-weight:700; color:#dc2626; }
+div[data-testid="stButton"]>button {
+    background:linear-gradient(135deg,#b91c1c,#dc2626); color:white;
+    border:none; border-radius:10px; font-weight:700; font-size:1rem;
+    padding:13px 34px; width:100%; transition:opacity .2s;
+}
+div[data-testid="stButton"]>button:hover { opacity:.88; }
+div[data-testid="stDownloadButton"]>button {
+    background:linear-gradient(135deg,#991b1b,#b91c1c); color:white;
+    border:none; border-radius:10px; font-weight:700; padding:11px 26px; width:100%;
+}
+div[data-testid="stDownloadButton"]>button:hover { opacity:.88; }
+[data-testid="metric-container"] {
+    background: var(--secondary-background-color, #ffffff);
+    border-radius:10px; border:1px solid var(--text-color, #e2e8f0);
+    padding:12px 16px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Receipt counter  ·  TTR-YYYY-XXXX
+# ════════════════════════════════════════════════════════════════════════════
+def _load_counter():
+    if COUNTER_FILE.exists():
+        with open(COUNTER_FILE) as f:
+            return json.load(f)
+    return {"year": datetime.now().year, "seq": 0}
+
+def _save_counter(data):
+    with open(COUNTER_FILE, "w") as f:
+        json.dump(data, f)
+
+def next_receipt_number():
+    data = _load_counter()
+    yr = datetime.now().year
+    if data["year"] != yr:
+        data = {"year": yr, "seq": 0}
+    data["seq"] += 1
+    _save_counter(data)
+    return f"TTR-{data['year']}-{data['seq']:04d}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Excel loader
+# ════════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
+def load_tracks(filepath: str) -> pd.DataFrame:
+    df = pd.read_excel(filepath)
+    df.columns = df.columns.str.strip()
+    rename = {}
+    for col in df.columns:
+        cl = col.lower()
+        if "university" in cl:  rename[col] = "University"
+        elif "track" in cl:     rename[col] = "Track Name"
+        elif "hour" in cl:      rename[col] = "Hours"
+        elif "price" in cl:     rename[col] = "Price"
+    df.rename(columns=rename, inplace=True)
+    missing = {"University", "Track Name", "Hours", "Price"} - set(df.columns)
+    if missing:
+        st.error(f"Missing columns in Excel: {missing}")
+        st.stop()
+    df["Price"] = pd.to_numeric(df["Price"], errors="coerce").fillna(0)
+    df["Hours"] = pd.to_numeric(df["Hours"], errors="coerce").fillna(0)
+    return df
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Template filler  ·  handles split {{ key }} across Word XML runs
+# ════════════════════════════════════════════════════════════════════════════
+# Keys that Word tends to split across multiple <w:t> runs
+_SPLIT_KEYS = [
+    "notes", "date", "student_name", "phone",
+    "university", "payment_method",
+]
+
+
+def _fix_split_placeholders(xml: str) -> str:
+    """Merge {{ key }} placeholders that Word split across multiple runs."""
+    for key in _SPLIT_KEYS:
+        pattern = re.compile(
+            r'(<w:t[^>]*>)\{\{[^}]{0,5}</w:t>'
+            r'(?:(?!<w:t>|<w:t ).)*?'
+            r'<w:t[^>]*>\s*' + re.escape(key) + r'\s*</w:t>'
+            r'(?:(?!<w:t>|<w:t ).)*?'
+            r'<w:t[^>]*>\s*\}\}\s*</w:t>',
+            re.DOTALL,
+        )
+        xml = pattern.sub(
+            lambda m, k=key: m.group(1) + '{{ ' + k + ' }}</w:t>',
+            xml,
+        )
+    return xml
+
+def _substitute(xml: str, data: dict) -> str:
+    """
+    Replace all template placeholders with XML-safe values.
+    Prevents DOCX corruption from &, <, >, quotes, etc.
+    """
+
+    for key, val in data.items():
+
+        # Convert value safely for XML
+        safe_val = escape(str(val))
+
+        # Handle all spacing variations
+        variants = [
+            f"{{{{ {key} }}}}",
+            f"{{{{{key}}}}}",
+            f"{{{{ {key}}}}}",
+            f"{{{{{key} }}}}",
+        ]
+
+        for variant in variants:
+            xml = xml.replace(variant, safe_val)
+
+    return xml
+
+def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
+    file_contents: dict[str, bytes] = {}
+    with zipfile.ZipFile(template_path) as z:
+        for name in z.namelist():
+            file_contents[name] = z.read(name)
+
+    xml = file_contents["word/document.xml"].decode("utf-8")
+    xml = _fix_split_placeholders(xml)
+    xml = _substitute(xml, data)
+    file_contents["word/document.xml"] = xml.encode("utf-8")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        docx_path = os.path.join(tmp, "receipt.docx")
+        pdf_path = os.path.join(tmp, "receipt.pdf")
+
+        with zipfile.ZipFile(docx_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name, content in file_contents.items():
+                zout.writestr(name, content)
+
+        docx_bytes = open(docx_path, "rb").read()
+
+        # LibreOffice conversion
+        if SOFFICE_WRAPPER.exists():
+            cmd = [sys.executable, str(SOFFICE_WRAPPER),
+                   "--headless", "--convert-to", "pdf",
+                   docx_path, "--outdir", tmp]
+        else:
+            cmd = ["soffice", "--headless", "--convert-to", "pdf",
+                   "--outdir", tmp, docx_path]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("LibreOffice conversion timed out after 90 seconds.")
+
+        if not os.path.exists(pdf_path):
+            debug_msg = (
+                "\n===== PDF CONVERSION FAILED =====\n"
+                f"COMMAND: {' '.join(cmd)}\n\n"
+                f"RETURN CODE: {result.returncode}\n\n"
+                f"STDOUT:\n{result.stdout}\n\n"
+                f"STDERR:\n{result.stderr}\n"
+            )
+            raise RuntimeError(debug_msg)
+
+        pdf_bytes = open(pdf_path, "rb").read()
+
+    return docx_bytes, pdf_bytes
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ════════════════════════════════════════════════════════════════════════════
+def main():
+    # Header with logo
+    logo_b64 = ""
+    if Path("logo.png").exists():
+        with open("logo.png", "rb") as f:
+            logo_b64 = base64.b64encode(f.read()).decode()
+
+    logo_html = f'<img src="data:image/png;base64,{logo_b64}" style="height:58px;">' if logo_b64 else ""
+    st.markdown(f"""
+    <div class="app-header">
+        {logo_html}
+        <div>
+            <h1>{ACADEMY_NAME}</h1>
+            <p>Student Enrollment Receipt Generation System</p>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Guards
+    if not TEMPLATE_FILE.exists():
+        st.error("❌ `receipt_template.docx` not found. Place it in the app directory.")
+        return
+    if not EXCEL_FILE.exists():
+        st.error("❌ `tracks.xlsx` not found.")
+        with st.expander("📥 Generate sample tracks.xlsx"):
+            if st.button("Create sample file"):
+                pd.DataFrame({
+                    "University": ["Cairo University", "Cairo University",
+                                   "Ain Shams University", "Ain Shams University",
+                                   "Alexandria University"],
+                    "Track Name": ["Data Science", "Web Development",
+                                   "Cybersecurity", "AI & Machine Learning",
+                                   "Project Management"],
+                    "Hours":  [120, 80, 100, 150, 60],
+                    "Price":  [8500, 6000, 9000, 12000, 5000],
+                }).to_excel(EXCEL_FILE, index=False)
+                st.success("✅ Created! Rerun the app.")
+        return
+
+    df = load_tracks(str(EXCEL_FILE))
+
+    # ── SECTION 1 · User Info ─────────────────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">👤 User Info</div>', unsafe_allow_html=True)
+    staff_choice = st.selectbox(
+        "Receiver / Staff Name",
+        options=STAFF_LIST + ["Other…"],
+        index=0,
+    )
+    if staff_choice == "Other…":
+        receiver_name = st.text_input("Enter name manually", placeholder="Full name…")
+    else:
+        receiver_name = staff_choice
+        st.caption(f"✅ Receiving: **{receiver_name}**")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── SECTION 2 · University ────────────────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">🏫 University Selection</div>', unsafe_allow_html=True)
+    universities = sorted(df["University"].dropna().unique().tolist())
+    if not universities:
+        st.error("No universities found.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    selected_university = st.selectbox(
+        "Select University", ["— Please select —"] + universities, key="univ")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if selected_university == "— Please select —":
+        st.info("👆 Select a university to continue.")
+        return
+
+    # ── SECTION 3 · Track ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">📚 Track Selection</div>', unsafe_allow_html=True)
+    uni_df = df[df["University"] == selected_university].reset_index(drop=True)
+    if uni_df.empty:
+        st.error(f"No tracks found for **{selected_university}**.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    selected_track = st.selectbox(
+        "Select Track", ["— Please select —"] + uni_df["Track Name"].tolist(), key="track")
+
+    if selected_track != "— Please select —":
+        row = uni_df[uni_df["Track Name"] == selected_track].iloc[0]
+        track_hours = int(row["Hours"])
+        track_price = float(row["Price"])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Track",    selected_track)
+        c2.metric("⏱ Hours",  f"{track_hours} hrs")
+        c3.metric("💰 Price", f"EGP {track_price:,.0f}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if selected_track == "— Please select —":
+        st.info("👆 Select a track to continue.")
+        return
+
+    # ── SECTION 4 · Student Info ──────────────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">📋 Student Information</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        student_name = st.text_input("Student Full Name *", placeholder="e.g. Ahmed Mohamed")
+        student_id   = st.text_input("Student ID",          placeholder="e.g. 20211234")
+    with c2:
+        phone   = st.text_input("Phone Number *",     placeholder="e.g. 01012345678")
+        faculty = st.text_input("Faculty (optional)", placeholder="e.g. Faculty of Engineering")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── SECTION 5 · Payment ───────────────────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">💳 Payment Details</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        paid = st.number_input(
+            "Paid Amount (EGP)",
+            min_value=0.0, max_value=float(track_price),
+            value=float(track_price), step=100.0, format="%.0f",
+        )
+    with c2:
+        payment_method = st.selectbox(
+            "Payment Method",
+            ["Cash", "Bank Transfer", "Instapay", "Vodafone Cash", "Credit Card", "Cheque"],
+        )
+    remaining = track_price - paid
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── SECTION 6 · Summary ───────────────────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">🧾 Receipt Summary</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="summary-box">
+      <div class="s-row"><span class="s-lbl">University</span><span class="s-val">{selected_university}</span></div>
+      <div class="s-row"><span class="s-lbl">Track</span><span class="s-val">{selected_track}</span></div>
+      <div class="s-row"><span class="s-lbl">Hours</span><span class="s-val">{track_hours} hrs</span></div>
+      <div class="s-row"><span class="s-lbl">Student</span><span class="s-val">{student_name or "—"}</span></div>
+      <div class="s-row"><span class="s-lbl">Phone</span><span class="s-val">{phone or "—"}</span></div>
+      <div class="s-row"><span class="s-lbl">Track Price</span><span class="s-val">EGP {track_price:,.0f}</span></div>
+      <div class="s-row"><span class="s-lbl">Paid</span><span class="s-val">EGP {paid:,.0f}</span></div>
+      <div class="s-row s-total"><span class="s-lbl">Remaining</span>
+        <span class="s-total">EGP {remaining:,.0f}</span></div>
+      <div class="s-row"><span class="s-lbl">Receiver</span><span class="s-val">{receiver_name or "—"}</span></div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── SECTION 7 · Notes (end of form) ──────────────────────────────────────
+    st.markdown('<div class="section-card"><div class="section-title">📝 Notes</div>', unsafe_allow_html=True)
+    notes = st.text_area(
+        "Additional Notes (optional)",
+        placeholder="e.g. First instalment — remaining due next month…",
+        height=90,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── SECTION 8 · Generate ──────────────────────────────────────────────────
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+
+    if st.button("🖨️  Generate Receipt PDF"):
+        errors = []
+        if not student_name.strip():   errors.append("Student name is required.")
+        if not phone.strip():          errors.append("Phone number is required.")
+        if not receiver_name.strip():  errors.append("Receiver / staff name is required.")
+
+        if errors:
+            for e in errors:
+                st.error(f"❌ {e}")
+        else:
+            receipt_num  = next_receipt_number()
+            receipt_date = datetime.now().strftime("%d/%m/%Y")
+
+            template_data = {
+                "receipt_number":   receipt_num,
+                "date":             receipt_date,
+                "student_name":     student_name.strip(),
+                "student_id":       student_id.strip(),
+                "phone":            phone.strip(),
+                "faculty":          faculty.strip(),
+                "university":       selected_university,
+                "track_name":       selected_track,
+                "required_amount":  f"EGP {track_price:,.0f}",
+                "paid_amount":      f"EGP {paid:,.0f}",
+                "remaining_amount": f"EGP {remaining:,.0f}",
+                "payment_method":   payment_method,
+                "notes":            notes.strip(),
+                "receiver_name":    receiver_name.strip(),
+            }
+
+            with st.spinner("Filling template and generating PDF…"):
+                try:
+                    docx_bytes, pdf_bytes = fill_template(
+                        str(TEMPLATE_FILE), template_data
+                    )
+                except Exception as exc:
+                    st.error(f"❌ PDF generation failed: {exc}")
+                    st.stop()
+
+            # Save copies
+            RECEIPTS_DIR.mkdir(exist_ok=True)
+            (RECEIPTS_DIR / f"{receipt_num}.docx").write_bytes(docx_bytes)
+            (RECEIPTS_DIR / f"{receipt_num}.pdf").write_bytes(pdf_bytes)
+
+            st.success(f"✅ Receipt **{receipt_num}** generated successfully!")
+
+            safe_name = student_name.strip().replace(" ", "_")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label="📥  Download PDF",
+                    data=pdf_bytes,
+                    file_name=f"Receipt_{receipt_num}_{safe_name}.pdf",
+                    mime="application/pdf",
+                    key="dl_pdf",
+                )
+            with col2:
+                st.download_button(
+                    label="📄  Download Word (.docx)",
+                    data=docx_bytes,
+                    file_name=f"Receipt_{receipt_num}_{safe_name}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="dl_docx",
+                )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Receipt History ───────────────────────────────────────────────────────
+    if RECEIPTS_DIR.exists():
+        pdfs = sorted(RECEIPTS_DIR.glob("TTR-*.pdf"), reverse=True)
+        if pdfs:
+            with st.expander(f"📂 Receipt History  ({len(pdfs)} receipts)", expanded=False):
+                for pf in pdfs[:30]:
+                    c1, c2 = st.columns([4, 1])
+                    c1.write(f"📄 `{pf.stem}`")
+                    c2.download_button(
+                        "⬇️", data=pf.read_bytes(),
+                        file_name=pf.name, mime="application/pdf",
+                        key=f"hist_{pf.stem}",
+                    )
+
+
+if __name__ == "__main__":
+    main()
