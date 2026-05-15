@@ -149,28 +149,35 @@ def load_tracks(filepath: str) -> pd.DataFrame:
 # ════════════════════════════════════════════════════════════════════════════
 # Template filler  ·  handles split {{ key }} across Word XML runs
 # ════════════════════════════════════════════════════════════════════════════
-# Keys that Word tends to split across multiple <w:t> runs
-_SPLIT_KEYS = [
-    "notes", "date", "student_name", "phone",
-    "university", "payment_method",
-]
 
 
 def _fix_split_placeholders(xml: str) -> str:
     """Merge {{ key }} placeholders that Word split across multiple runs."""
-    for key in _SPLIT_KEYS:
-        pattern = re.compile(
-            r'(<w:t[^>]*>)\{\{[^}]{0,5}</w:t>'
-            r'(?:(?!<w:t>|<w:t ).)*?'
-            r'<w:t[^>]*>\s*' + re.escape(key) + r'\s*</w:t>'
-            r'(?:(?!<w:t>|<w:t ).)*?'
-            r'<w:t[^>]*>\s*\}\}\s*</w:t>',
-            re.DOTALL,
-        )
-        xml = pattern.sub(
-            lambda m, k=key: m.group(1) + '{{ ' + k + ' }}</w:t>',
-            xml,
-        )
+    # Remove spell-check markers that split underscored keys (e.g. receiver_name)
+    xml = re.sub(r'<w:proofErr[^>]*/>', '', xml)
+
+    # Merge any {{ key }} span across multiple <w:t> runs
+    def _merge(m):
+        opening = m.group(1)
+        segment = m.group(0)
+        texts = re.findall(r'<w:t[^>]*>(.*?)</w:t>', segment)
+        key_parts = []
+        for t in texts:
+            t_clean = t.strip().replace("{{", "").replace("}}", "").strip()
+            if t_clean:
+                key_parts.append(t_clean)
+        key = "".join(key_parts).replace(" ", "")
+        if key:
+            return opening + "{{ " + key + " }}</w:t>"
+        return segment
+
+    pattern = re.compile(
+        r'(<w:t[^>]*>)\s*\{\{[^}]*</w:t>'
+        r'(?:(?!<w:t[^>]*>\s*\{\{).)*?'
+        r'<w:t[^>]*>\s*\}\}\s*</w:t>',
+        re.DOTALL,
+    )
+    xml = pattern.sub(_merge, xml)
     return xml
 
 def _substitute(xml: str, data: dict) -> str:
