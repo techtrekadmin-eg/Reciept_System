@@ -33,7 +33,7 @@ RECEIPTS_DIR    = Path("receipts")
 COUNTER_FILE    = Path("receipt_counter.json")
 EXCEL_FILE      = Path("tracks.xlsx")
 TEMPLATE_FILE   = Path("receipt_template.docx")
-STAFF_LIST      = ["Menna Hagag", "Mariem Hisham", "Malak Mahmoud", "Omar Mohamed", "Mohamed Hallawa", "Diana Adel", "Ahmed Fathy"]
+STAFF_LIST      = ["Fatma Khaled","Menna Hagag", "Mariem Hisham", "Malak Mahmoud", "Omar Mohamed", "Mohamed Hallawa", "Diana Adel", "Ahmed Fathy"]
 ACADEMY_NAME    = "TechTrek"
 
 # ── Page config ───────────────────────────────────────────────────────────────
