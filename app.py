@@ -154,9 +154,6 @@ def load_tracks(filepath: str) -> pd.DataFrame:
 
 def _fix_split_placeholders(xml: str) -> str:
     """Merge {{ key }} placeholders that Word split across multiple runs."""
-    # Remove spell-check markers that split underscored keys (e.g. receiver_name)
-    xml = re.sub(r'<w:proofErr[^>]*/>', '', xml)
-
     # Merge any {{ key }} span across multiple <w:t> runs. The opening braces
     # may follow ordinary text in the same run (for example, an Arabic label).
     def _merge(m):
@@ -341,20 +338,20 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
         # Convert filled DOCX to PDF — try soffice first
         pdf_path = os.path.join(tmp, "receipt.pdf")
         try:
-            subprocess.run(
+            conversion = subprocess.run(
                 ["soffice", "--headless", "--convert-to", "pdf",
                  "--outdir", tmp, docx_path],
                 capture_output=True, text=True, timeout=90,
             )
-            if os.path.exists(pdf_path):
+            if conversion.returncode == 0 and os.path.exists(pdf_path):
                 pdf_bytes = open(pdf_path, "rb").read()
                 return docx_bytes, pdf_bytes
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    # Fallback: generate PDF via reportlab
-    pdf_bytes = _generate_pdf(data)
-    return docx_bytes, pdf_bytes
+    raise RuntimeError(
+        "Template-based PDF conversion failed. No alternate receipt layout was generated."
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
