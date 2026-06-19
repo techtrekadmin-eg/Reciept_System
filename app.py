@@ -337,20 +337,33 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
 
         # Convert filled DOCX to PDF — try soffice first
         pdf_path = os.path.join(tmp, "receipt.pdf")
-        try:
-            conversion = subprocess.run(
-                ["soffice", "--headless", "--convert-to", "pdf",
-                 "--outdir", tmp, docx_path],
-                capture_output=True, text=True, timeout=90,
-            )
+        conversion_errors = []
+        for converter in ("soffice", "libreoffice"):
+            try:
+                conversion = subprocess.run(
+                    [converter, "--headless", "--convert-to", "pdf",
+                     "--outdir", tmp, docx_path],
+                    capture_output=True, text=True, timeout=90,
+                )
+            except FileNotFoundError:
+                conversion_errors.append(f"`{converter}` is not installed")
+                continue
+            except subprocess.TimeoutExpired:
+                conversion_errors.append(f"`{converter}` timed out")
+                continue
+
             if conversion.returncode == 0 and os.path.exists(pdf_path):
                 pdf_bytes = open(pdf_path, "rb").read()
                 return docx_bytes, pdf_bytes
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+
+            details = (conversion.stderr or conversion.stdout).strip()
+            conversion_errors.append(
+                f"`{converter}` exited with code {conversion.returncode}"
+                + (f": {details}" if details else "")
+            )
 
     raise RuntimeError(
-        "Template-based PDF conversion failed. No alternate receipt layout was generated."
+        "Template-based PDF conversion failed. " + "; ".join(conversion_errors)
     )
 
 
