@@ -20,6 +20,15 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 import base64
 from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    Image as RLImage, HRFlowable,
+)
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 # ── Constants ────────────────────────────────────────────────────────────────
 RECEIPTS_DIR    = Path("receipts")
 COUNTER_FILE    = Path("receipt_counter.json")
@@ -372,9 +381,11 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
                 + (f": {details}" if details else "")
             )
 
-    raise RuntimeError(
-        "Template-based PDF conversion failed: " + "; ".join(conversion_errors)
+    logger.warning(
+        "Template conversion failed; using the original PDF fallback: %s",
+        "; ".join(conversion_errors),
     )
+    return docx_bytes, _generate_pdf(data)
 
 
 def generate_receipt_pdf(data: dict) -> str:
