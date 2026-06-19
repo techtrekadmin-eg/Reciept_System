@@ -636,15 +636,18 @@ def main():
 
             with st.spinner("Filling template and generating PDF…"):
                 try:
-                    generated_pdf_path = Path(generate_receipt_pdf(template_data))
-                    generated_docx_path = generated_pdf_path.with_suffix(".docx")
-                    pdf_bytes = generated_pdf_path.read_bytes()
-                    docx_bytes = generated_docx_path.read_bytes()
+                    docx_bytes, pdf_bytes = fill_template(
+                        str(TEMPLATE_FILE), template_data
+                    )
                 except Exception as exc:
                     st.error(f"❌ PDF generation failed: {exc}")
                     st.stop()
 
             st.success(f"✅ Receipt **{receipt_num}** generated successfully!")
+
+            RECEIPTS_DIR.mkdir(exist_ok=True)
+            (RECEIPTS_DIR / f"{receipt_num}.docx").write_bytes(docx_bytes)
+            (RECEIPTS_DIR / f"{receipt_num}.pdf").write_bytes(pdf_bytes)
 
             safe_name = student_name.strip().replace(" ", "_")
             col1, col2 = st.columns(2)
@@ -669,7 +672,7 @@ def main():
 
     # ── Receipt History ───────────────────────────────────────────────────────
     if RECEIPTS_DIR.exists():
-        pdfs = sorted(RECEIPTS_DIR.glob("Receipt_*.pdf"), reverse=True)
+        pdfs = sorted(RECEIPTS_DIR.glob("TTR-*.pdf"), reverse=True)
         if pdfs:
             with st.expander(f"📂 Receipt History  ({len(pdfs)} receipts)", expanded=False):
                 for pf in pdfs[:30]:
