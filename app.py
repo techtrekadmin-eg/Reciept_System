@@ -157,28 +157,14 @@ def _fix_split_placeholders(xml: str) -> str:
     # Remove spell-check markers that split underscored keys (e.g. receiver_name)
     xml = re.sub(r'<w:proofErr[^>]*/>', '', xml)
 
-    # Merge any {{ key }} span across multiple <w:t> runs
+    # Merge any {{ key }} span across multiple <w:t> runs. The opening braces
+    # may follow ordinary text in the same run (for example, an Arabic label).
     def _merge(m):
-        opening = m.group(1)
-        segment = m.group(0)
-        texts = re.findall(r'<w:t[^>]*>(.*?)</w:t>', segment)
-        key_parts = []
-        for t in texts:
-            t_clean = t.strip().replace("{{", "").replace("}}", "").strip()
-            if t_clean:
-                key_parts.append(t_clean)
-        key = "".join(key_parts).replace(" ", "")
-        if key:
-            return opening + "{{ " + key + " }}</w:t>"
-        return segment
+        text_only = re.sub(r'<[^>]+>', '', m.group(0))
+        key = text_only[2:-2].strip().replace(" ", "")
+        return "{{ " + key + " }}" if key else m.group(0)
 
-    pattern = re.compile(
-        r'(<w:t[^>]*>)\s*\{\{[^}]*</w:t>'
-        r'(?:(?!<w:t[^>]*>\s*\{\{).)*?'
-        r'<w:t[^>]*>\s*\}\}\s*</w:t>',
-        re.DOTALL,
-    )
-    xml = pattern.sub(_merge, xml)
+    xml = re.sub(r'\{\{(?:(?!\}\}).)*\}\}', _merge, xml, flags=re.DOTALL)
     return xml
 
 def _substitute(xml: str, data: dict) -> str:
@@ -294,6 +280,8 @@ def _generate_pdf(data: dict) -> bytes:
          Paragraph("Required", s_label), Paragraph(data["required_amount"], s_value)],
         [Paragraph("Paid", s_label), Paragraph(data["paid_amount"], s_value),
          Paragraph("Remaining", s_label), Paragraph(f'<font color="{RED}"><b>{data["remaining_amount"]}</b></font>', s_value)],
+        [Paragraph("Status", s_label), Paragraph(data["status"], s_value),
+         Paragraph("", s_label), Paragraph("", s_value)],
     ]
     tp_table = Table(tp_data, colWidths=[24*mm, 50*mm, 24*mm, 50*mm])
     tp_table.setStyle(TableStyle([
@@ -502,7 +490,7 @@ def main():
 
     # ── SECTION 5 · Payment ───────────────────────────────────────────────────
     st.markdown('<div class="section-card"><div class="section-title">💳 Payment Details</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         paid = st.number_input(
             "Paid Amount (EGP)",
@@ -512,8 +500,10 @@ def main():
     with c2:
         payment_method = st.selectbox(
             "Payment Method",
-            ["Cash", "Bank Transfer", "Instapay", "Vodafone Cash", "Credit Card", "Cheque"],
+            ["Cash", "Bank Transfer", "Wallet"],
         )
+    with c3:
+        payment_status = st.selectbox("Payment Status", ["Deposit", "Fully Paid"])
     remaining = track_price - paid
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -530,6 +520,7 @@ def main():
       <div class="s-row"><span class="s-lbl">Department</span><span class="s-val">{department if department != "— Please select —" else "—"}</span></div>
       <div class="s-row"><span class="s-lbl">Track Price</span><span class="s-val">EGP {track_price:,.0f}</span></div>
       <div class="s-row"><span class="s-lbl">Paid</span><span class="s-val">EGP {paid:,.0f}</span></div>
+      <div class="s-row"><span class="s-lbl">Status</span><span class="s-val">{payment_status}</span></div>
       <div class="s-row s-total"><span class="s-lbl">Remaining</span>
         <span class="s-total">EGP {remaining:,.0f}</span></div>
       <div class="s-row"><span class="s-lbl">Receiver</span><span class="s-val">{receiver_name or "—"}</span></div>
@@ -579,6 +570,7 @@ def main():
                 "paid_amount":      f"EGP {paid:,.0f}",
                 "remaining_amount": f"EGP {remaining:,.0f}",
                 "payment_method":   payment_method,
+                "status":           payment_status,
                 "notes":            notes.strip(),
                 "receiver_name":    receiver_name.strip(),
             }
