@@ -469,7 +469,7 @@ def main():
         with c1:
             faculty = st.selectbox(
                 "Faculty (optional)",
-                ["Engineering", "Computer Science", "Science (SIM)", "Business"],
+                ["Engineering", "Computer Science", "Science (SIM)", "Business", "Communication", "Mechatronics", "Industry"],
             )
         with c2:
             department_choice = st.selectbox(
@@ -494,7 +494,7 @@ def main():
     with c2:
         payment_method = st.selectbox(
             "Payment Method",
-            ["Cash", "Bank Transfer", "Wallet"],
+            [ "Bank Transfer", "Cash", "Wallet"],
         )
     with c3:
         payment_status = st.selectbox("Payment Status", ["Deposit", "Fully Paid"])
