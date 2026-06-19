@@ -267,8 +267,10 @@ def _generate_pdf(data: dict) -> bytes:
         [Paragraph("Name", s_label), Paragraph(data["student_name"], s_value),
          Paragraph("ID", s_label), Paragraph(data["student_id"] or "—", s_value)],
         [Paragraph("Phone", s_label), Paragraph(data["phone"], s_value),
-         Paragraph("Faculty", s_label), Paragraph(data["faculty"] or "—", s_value)],
-        [Paragraph("University", s_label), Paragraph(data["university"], s_value),
+         Paragraph("Gmail", s_label), Paragraph(data["student_gmail"] or "—", s_value)],
+        [Paragraph("Faculty", s_label), Paragraph(data["faculty"] or "—", s_value),
+         Paragraph("University", s_label), Paragraph(data["university"], s_value)],
+        [Paragraph("Department", s_label), Paragraph(data["department"] or "—", s_value),
          Paragraph("", s_label), Paragraph("", s_value)],
     ]
     si_table = Table(si_data, colWidths=[24*mm, 50*mm, 24*mm, 50*mm])
@@ -288,10 +290,10 @@ def _generate_pdf(data: dict) -> bytes:
     tp_data = [
         [Paragraph("Track", s_label), Paragraph(data["track_name"], s_value),
          Paragraph("Method", s_label), Paragraph(data["payment_method"], s_value)],
-        [Paragraph("Required", s_label), Paragraph(data["required_amount"], s_value),
-         Paragraph("Paid", s_label), Paragraph(data["paid_amount"], s_value)],
-        [Paragraph("Remaining", s_label), Paragraph(f'<font color="{RED}"><b>{data["remaining_amount"]}</b></font>', s_value),
-         Paragraph("", s_label), Paragraph("", s_value)],
+        [Paragraph("Credit Hours", s_label), Paragraph(data["credit_hours"], s_value),
+         Paragraph("Required", s_label), Paragraph(data["required_amount"], s_value)],
+        [Paragraph("Paid", s_label), Paragraph(data["paid_amount"], s_value),
+         Paragraph("Remaining", s_label), Paragraph(f'<font color="{RED}"><b>{data["remaining_amount"]}</b></font>', s_value)],
     ]
     tp_table = Table(tp_data, colWidths=[24*mm, 50*mm, 24*mm, 50*mm])
     tp_table.setStyle(TableStyle([
@@ -466,15 +468,37 @@ def main():
         return
 
     # ── SECTION 4 · Student Info ──────────────────────────────────────────────
-    st.markdown('<div class="section-card"><div class="section-title">📋 Student Information</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        student_name = st.text_input("Student Full Name *", placeholder="e.g. Ahmed Mohamed")
-        student_id   = st.text_input("Student ID",          placeholder="e.g. 20211234")
-    with c2:
-        phone   = st.text_input("Phone Number *",     placeholder="e.g. 01012345678")
-        faculty = st.text_input("Faculty (optional)", placeholder="e.g. Faculty of Engineering")
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown('<div class="section-title">📋 Student Information</div>', unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            student_name = st.text_input("Student Full Name *", placeholder="e.g. Ahmed Mohamed")
+        with c2:
+            phone = st.text_input("Phone Number *", placeholder="e.g. 01012345678")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            student_id = st.text_input("Student ID *", placeholder="e.g. 20211234")
+        with c2:
+            student_gmail = st.text_input("Student Gmail", placeholder="e.g. student@gmail.com")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            faculty = st.selectbox(
+                "Faculty (optional)",
+                ["Engineering", "Computer Science", "Science (SIM)", "Business"],
+            )
+        with c2:
+            department_choice = st.selectbox(
+                "Department",
+                ["— Please select —", "Data Science", "Cyber Security", "SIM", "Artificial Intelligence", "Other"],
+            )
+
+        department_other = ""
+        if department_choice == "Other":
+            department_other = st.text_input("Enter Department", placeholder="e.g. Software Engineering")
+        department = department_other if department_choice == "Other" else department_choice
 
     # ── SECTION 5 · Payment ───────────────────────────────────────────────────
     st.markdown('<div class="section-card"><div class="section-title">💳 Payment Details</div>', unsafe_allow_html=True)
@@ -502,6 +526,8 @@ def main():
       <div class="s-row"><span class="s-lbl">Hours</span><span class="s-val">{track_hours} hrs</span></div>
       <div class="s-row"><span class="s-lbl">Student</span><span class="s-val">{student_name or "—"}</span></div>
       <div class="s-row"><span class="s-lbl">Phone</span><span class="s-val">{phone or "—"}</span></div>
+      <div class="s-row"><span class="s-lbl">Gmail</span><span class="s-val">{student_gmail or "—"}</span></div>
+      <div class="s-row"><span class="s-lbl">Department</span><span class="s-val">{department if department != "— Please select —" else "—"}</span></div>
       <div class="s-row"><span class="s-lbl">Track Price</span><span class="s-val">EGP {track_price:,.0f}</span></div>
       <div class="s-row"><span class="s-lbl">Paid</span><span class="s-val">EGP {paid:,.0f}</span></div>
       <div class="s-row s-total"><span class="s-lbl">Remaining</span>
@@ -525,6 +551,7 @@ def main():
     if st.button("🖨️  Generate Receipt PDF"):
         errors = []
         if not student_name.strip():   errors.append("Student name is required.")
+        if not student_id.strip():     errors.append("Student ID is required.")
         if not phone.strip():          errors.append("Phone number is required.")
         if not receiver_name.strip():  errors.append("Receiver / staff name is required.")
 
@@ -541,9 +568,13 @@ def main():
                 "student_name":     student_name.strip(),
                 "student_id":       student_id.strip(),
                 "phone":            phone.strip(),
-                "faculty":          faculty.strip(),
+                "student_gmail":    student_gmail.strip(),
+                "Gmail":            student_gmail.strip(),
+                "faculty":          faculty,
+                "department":       "" if department == "— Please select —" else department.strip(),
                 "university":       selected_university,
                 "track_name":       selected_track,
+                "credit_hours":     f"{track_hours} hrs",
                 "required_amount":  f"EGP {track_price:,.0f}",
                 "paid_amount":      f"EGP {paid:,.0f}",
                 "remaining_amount": f"EGP {remaining:,.0f}",
