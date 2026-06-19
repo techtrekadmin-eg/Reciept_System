@@ -14,21 +14,10 @@ import os
 import re
 import subprocess
 import tempfile
-import zipfile
 from datetime import datetime
 from pathlib import Path
-from xml.sax.saxutils import escape
 import base64
-from io import BytesIO
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    Image as RLImage, HRFlowable,
-)
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
+from docxtpl import DocxTemplate
 # ── Constants ────────────────────────────────────────────────────────────────
 RECEIPTS_DIR    = Path("receipts")
 COUNTER_FILE    = Path("receipt_counter.json")
@@ -160,49 +149,23 @@ def load_tracks(filepath: str) -> pd.DataFrame:
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def _fix_split_placeholders(xml: str) -> str:
-    """Merge {{ key }} placeholders that Word split across multiple runs."""
-    # Merge any {{ key }} span across multiple <w:t> runs. The opening braces
-    # may follow ordinary text in the same run (for example, an Arabic label).
-    def _merge(m):
-        text_only = re.sub(r'<[^>]+>', '', m.group(0))
-        key = text_only[2:-2].strip().replace(" ", "")
-        return "{{ " + key + " }}" if key else m.group(0)
-
-    xml = re.sub(r'\{\{(?:(?!\}\}).)*\}\}', _merge, xml, flags=re.DOTALL)
-    return xml
-
-def _substitute(xml: str, data: dict) -> str:
-    """
-    Replace all template placeholders with XML-safe values.
-    Prevents DOCX corruption from &, <, >, quotes, etc.
-    """
-
-    placeholders = set(re.findall(r"\{\{\s*([^}]+?)\s*\}\}", xml))
-    missing_from_template = TEMPLATE_FIELDS - placeholders
-    for field in sorted(missing_from_template):
-        logger.warning("Receipt template is missing placeholder: %s", field)
-
-    for placeholder in sorted(placeholders - set(data)):
-        logger.warning("Receipt data is missing a value for placeholder: %s", placeholder)
-
-    for key, val in data.items():
-
-        # Convert value safely for XML
-        safe_val = escape("" if val is None else str(val))
-
-        # Handle all spacing variations
-        variants = [
-            f"{{{{ {key} }}}}",
-            f"{{{{{key}}}}}",
-            f"{{{{ {key}}}}}",
-            f"{{{{{key} }}}}",
-        ]
-
-        for variant in variants:
-            xml = xml.replace(variant, safe_val)
-
-    return xml
+def _template_context(data: dict) -> dict:
+    """Normalise website data and provide supported template aliases."""
+    context = {key: "" if value is None else str(value) for key, value in data.items()}
+    aliases = {
+        "receipt_number": "number_receipt",
+        "student_name": "name_student",
+        "credit_hours": "hours_credit",
+        "receiver_name": "name_receiver",
+        "Gmail": "student_gmail",
+    }
+    for field in TEMPLATE_FIELDS:
+        context.setdefault(field, "")
+    for primary, alternate in aliases.items():
+        value = context.get(primary) or context.get(alternate, "")
+        context[primary] = value
+        context[alternate] = value
+    return context
 
 def _generate_pdf(data: dict) -> bytes:
     RED = "#dc2626"
@@ -338,22 +301,25 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
     if not os.path.isfile(template_path):
         raise FileNotFoundError(f"Receipt template was not found: {template_path}")
 
-    file_contents: dict[str, bytes] = {}
-    with zipfile.ZipFile(template_path) as z:
-        for name in z.namelist():
-            file_contents[name] = z.read(name)
-
-    xml = file_contents["word/document.xml"].decode("utf-8")
-    xml = _fix_split_placeholders(xml)
-    xml = _substitute(xml, data)
-    file_contents["word/document.xml"] = xml.encode("utf-8")
+    template = DocxTemplate(template_path)
+    context = _template_context(data)
+    template_variables = set(template.get_undeclared_template_variables())
+    aliases = {
+        "receipt_number": "number_receipt",
+        "student_name": "name_student",
+        "credit_hours": "hours_credit",
+        "receiver_name": "name_receiver",
+        "Gmail": "student_gmail",
+    }
+    for field in sorted(TEMPLATE_FIELDS):
+        if not ({field, aliases.get(field, field)} & template_variables):
+            logger.warning("Receipt template is missing placeholder: %s", field)
 
     with tempfile.TemporaryDirectory() as tmp:
         docx_path = os.path.join(tmp, "receipt.docx")
-        with zipfile.ZipFile(docx_path, "w", zipfile.ZIP_DEFLATED) as zout:
-            for name, content in file_contents.items():
-                zout.writestr(name, content)
-        docx_bytes = open(docx_path, "rb").read()
+        template.render(context, autoescape=True)
+        template.save(docx_path)
+        docx_bytes = Path(docx_path).read_bytes()
 
         # Convert filled DOCX to PDF — try soffice first
         pdf_path = os.path.join(tmp, "receipt.pdf")
@@ -381,40 +347,9 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
                 + (f": {details}" if details else "")
             )
 
-    logger.warning(
-        "Template conversion failed; using the original PDF fallback: %s",
-        "; ".join(conversion_errors),
+    raise RuntimeError(
+        "Template-based PDF conversion failed: " + "; ".join(conversion_errors)
     )
-    return docx_bytes, _generate_pdf(data)
-
-
-def generate_receipt_pdf(data: dict) -> str:
-    """Create DOCX and PDF receipt files from the approved Word template."""
-    normalised_data = {
-        field: "" if data.get(field) is None else str(data.get(field, ""))
-        for field in TEMPLATE_FIELDS
-    }
-    normalised_data.update(
-        {key: "" if value is None else str(value) for key, value in data.items()}
-    )
-
-    receipt_number = normalised_data["receipt_number"].strip()
-    student_name = normalised_data["student_name"].strip()
-    if not receipt_number:
-        raise ValueError("A receipt number is required to generate the receipt.")
-
-    safe_student_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student_name).strip("_") or "student"
-    filename_base = f"Receipt_{receipt_number}_{safe_student_name}"
-    RECEIPTS_DIR.mkdir(exist_ok=True)
-    docx_path = RECEIPTS_DIR / f"{filename_base}.docx"
-    pdf_path = RECEIPTS_DIR / f"{filename_base}.pdf"
-
-    # The template archive is preserved; only placeholder text is substituted.
-    docx_bytes, pdf_bytes = fill_template(str(TEMPLATE_FILE), normalised_data)
-    docx_path.write_bytes(docx_bytes)
-    pdf_path.write_bytes(pdf_bytes)
-    return str(pdf_path)
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -646,27 +581,16 @@ def main():
             st.success(f"✅ Receipt **{receipt_num}** generated successfully!")
 
             RECEIPTS_DIR.mkdir(exist_ok=True)
-            (RECEIPTS_DIR / f"{receipt_num}.docx").write_bytes(docx_bytes)
             (RECEIPTS_DIR / f"{receipt_num}.pdf").write_bytes(pdf_bytes)
 
             safe_name = student_name.strip().replace(" ", "_")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="📥  Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"Receipt_{receipt_num}_{safe_name}.pdf",
-                    mime="application/pdf",
-                    key="dl_pdf",
-                )
-            with col2:
-                st.download_button(
-                    label="📄  Download Word (.docx)",
-                    data=docx_bytes,
-                    file_name=f"Receipt_{receipt_num}_{safe_name}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    key="dl_docx",
-                )
+            st.download_button(
+                label="📥  Download PDF",
+                data=pdf_bytes,
+                file_name=f"Receipt_{receipt_num}_{safe_name}.pdf",
+                mime="application/pdf",
+                key="dl_pdf",
+            )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
