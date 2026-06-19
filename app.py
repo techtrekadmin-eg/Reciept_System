@@ -2,13 +2,14 @@
 Academy Receipt Generation System  ·  v2.0
 - Staff name: dropdown (Omar, Menna, Mariem) + free input
 - Notes moved to end
-- Receipt = fill Word template → PDF via LibreOffice (fallback: reportlab)
+- Receipt = fill Word template → PDF via LibreOffice
 - Deployment-ready (Streamlit Cloud via packages.txt + GitHub)
 """
 
 import streamlit as st
 import pandas as pd
 import json
+import logging
 import os
 import re
 import subprocess
@@ -19,15 +20,6 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 import base64
 from io import BytesIO
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm, cm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    Image as RLImage, HRFlowable,
-)
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 # ── Constants ────────────────────────────────────────────────────────────────
 RECEIPTS_DIR    = Path("receipts")
 COUNTER_FILE    = Path("receipt_counter.json")
@@ -35,6 +27,13 @@ EXCEL_FILE      = Path("tracks.xlsx")
 TEMPLATE_FILE   = Path("receipt_template.docx")
 STAFF_LIST      = ["Fatma Khaled","Menna Hagag", "Mariem Hisham", "Malak Mahmoud", "Omar Mohamed", "Mohamed Hallawa", "Diana Adel", "Ahmed Fathy"]
 ACADEMY_NAME    = "TechTrek"
+TEMPLATE_FIELDS = {
+    "receipt_number", "date", "university", "status", "student_name",
+    "phone", "student_id", "faculty", "Gmail", "department", "track_name",
+    "credit_hours", "paid_amount", "required_amount", "remaining_amount",
+    "payment_method", "notes", "receiver_name",
+}
+logger = logging.getLogger(__name__)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -170,10 +169,18 @@ def _substitute(xml: str, data: dict) -> str:
     Prevents DOCX corruption from &, <, >, quotes, etc.
     """
 
+    placeholders = set(re.findall(r"\{\{\s*([^}]+?)\s*\}\}", xml))
+    missing_from_template = TEMPLATE_FIELDS - placeholders
+    for field in sorted(missing_from_template):
+        logger.warning("Receipt template is missing placeholder: %s", field)
+
+    for placeholder in sorted(placeholders - set(data)):
+        logger.warning("Receipt data is missing a value for placeholder: %s", placeholder)
+
     for key, val in data.items():
 
         # Convert value safely for XML
-        safe_val = escape(str(val))
+        safe_val = escape("" if val is None else str(val))
 
         # Handle all spacing variations
         variants = [
@@ -318,6 +325,10 @@ def _generate_pdf(data: dict) -> bytes:
 
 
 def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
+    """Fill the approved DOCX template and convert that same file to PDF."""
+    if not os.path.isfile(template_path):
+        raise FileNotFoundError(f"Receipt template was not found: {template_path}")
+
     file_contents: dict[str, bytes] = {}
     with zipfile.ZipFile(template_path) as z:
         for name in z.namelist():
@@ -337,20 +348,61 @@ def fill_template(template_path: str, data: dict) -> tuple[bytes, bytes]:
 
         # Convert filled DOCX to PDF — try soffice first
         pdf_path = os.path.join(tmp, "receipt.pdf")
-        try:
-            subprocess.run(
-                ["soffice", "--headless", "--convert-to", "pdf",
-                 "--outdir", tmp, docx_path],
-                capture_output=True, text=True, timeout=90,
-            )
-            if os.path.exists(pdf_path):
-                pdf_bytes = open(pdf_path, "rb").read()
-                return docx_bytes, pdf_bytes
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        conversion_errors = []
+        for converter in ("soffice", "libreoffice"):
+            try:
+                conversion = subprocess.run(
+                    [converter, "--headless", "--convert-to", "pdf",
+                     "--outdir", tmp, docx_path],
+                    capture_output=True, text=True, timeout=90,
+                )
+            except FileNotFoundError:
+                conversion_errors.append(f"{converter} is not installed")
+                continue
+            except subprocess.TimeoutExpired:
+                conversion_errors.append(f"{converter} timed out")
+                continue
 
-    # Fallback: generate the original built-in PDF layout.
-    return docx_bytes, _generate_pdf(data)
+            if conversion.returncode == 0 and os.path.isfile(pdf_path):
+                return docx_bytes, Path(pdf_path).read_bytes()
+
+            details = (conversion.stderr or conversion.stdout).strip()
+            conversion_errors.append(
+                f"{converter} exited with code {conversion.returncode}"
+                + (f": {details}" if details else "")
+            )
+
+    raise RuntimeError(
+        "Template-based PDF conversion failed: " + "; ".join(conversion_errors)
+    )
+
+
+def generate_receipt_pdf(data: dict) -> str:
+    """Create DOCX and PDF receipt files from the approved Word template."""
+    normalised_data = {
+        field: "" if data.get(field) is None else str(data.get(field, ""))
+        for field in TEMPLATE_FIELDS
+    }
+    normalised_data.update(
+        {key: "" if value is None else str(value) for key, value in data.items()}
+    )
+
+    receipt_number = normalised_data["receipt_number"].strip()
+    student_name = normalised_data["student_name"].strip()
+    if not receipt_number:
+        raise ValueError("A receipt number is required to generate the receipt.")
+
+    safe_student_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student_name).strip("_") or "student"
+    filename_base = f"Receipt_{receipt_number}_{safe_student_name}"
+    RECEIPTS_DIR.mkdir(exist_ok=True)
+    docx_path = RECEIPTS_DIR / f"{filename_base}.docx"
+    pdf_path = RECEIPTS_DIR / f"{filename_base}.pdf"
+
+    # The template archive is preserved; only placeholder text is substituted.
+    docx_bytes, pdf_bytes = fill_template(str(TEMPLATE_FILE), normalised_data)
+    docx_path.write_bytes(docx_bytes)
+    pdf_path.write_bytes(pdf_bytes)
+    return str(pdf_path)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -573,17 +625,13 @@ def main():
 
             with st.spinner("Filling template and generating PDF…"):
                 try:
-                    docx_bytes, pdf_bytes = fill_template(
-                        str(TEMPLATE_FILE), template_data
-                    )
+                    generated_pdf_path = Path(generate_receipt_pdf(template_data))
+                    generated_docx_path = generated_pdf_path.with_suffix(".docx")
+                    pdf_bytes = generated_pdf_path.read_bytes()
+                    docx_bytes = generated_docx_path.read_bytes()
                 except Exception as exc:
                     st.error(f"❌ PDF generation failed: {exc}")
                     st.stop()
-
-            # Save copies
-            RECEIPTS_DIR.mkdir(exist_ok=True)
-            (RECEIPTS_DIR / f"{receipt_num}.docx").write_bytes(docx_bytes)
-            (RECEIPTS_DIR / f"{receipt_num}.pdf").write_bytes(pdf_bytes)
 
             st.success(f"✅ Receipt **{receipt_num}** generated successfully!")
 
@@ -610,7 +658,7 @@ def main():
 
     # ── Receipt History ───────────────────────────────────────────────────────
     if RECEIPTS_DIR.exists():
-        pdfs = sorted(RECEIPTS_DIR.glob("TTR-*.pdf"), reverse=True)
+        pdfs = sorted(RECEIPTS_DIR.glob("Receipt_*.pdf"), reverse=True)
         if pdfs:
             with st.expander(f"📂 Receipt History  ({len(pdfs)} receipts)", expanded=False):
                 for pf in pdfs[:30]:
