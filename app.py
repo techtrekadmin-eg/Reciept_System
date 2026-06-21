@@ -474,7 +474,7 @@ def main():
         with c2:
             department_choice = st.selectbox(
                 "Department",
-                ["— Please select —", "Data Science", "Cyber Security", "SIM", "Artificial Intelligence", "Other"],
+                ["— Please select —", "Data Science", "Cyber Security", "SIM", "Artificial Intelligence", "Computational Linguistics", "Software Development", "Virtual and Augmented Reality", "Other"],
             )
 
         department_other = ""
